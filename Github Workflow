@@ -1,0 +1,241 @@
+name: 🚀 CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - release
+      - develop
+  pull_request:
+    branches:
+      - main
+      - release
+      - develop
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+# ─────────────────────────────────────────────────────────────
+#  ENVIRONMENT ROUTING
+#
+#  develop  →  Development  server  (DEV_*)
+#  release  →  Staging      server  (STAGING_*)
+#  main     →  Production   server  (PROD_*)
+#
+#  Pull Requests → Quality + Build only (never deploy)
+# ─────────────────────────────────────────────────────────────
+
+jobs:
+
+  # ───────────────────────────────────────────
+  # JOB 1 — Quality Gate (all branches + PRs)
+  # ───────────────────────────────────────────
+  quality:
+    name: 🔍 Quality Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install
+
+      - name: Run ESLint
+        run: yarn lint
+
+      - name: Run TypeScript check
+        run: yarn tsc --noEmit
+
+  # ───────────────────────────────────────────
+  # JOB 2 — Build (all branches + PRs)
+  # ───────────────────────────────────────────
+  build:
+    name: 🏗️ Build
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install
+
+      - name: Build Next.js
+        run: yarn build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.sha }}
+          path: |
+            .next/
+            public/
+          retention-days: 1
+
+  # ───────────────────────────────────────────
+  # JOB 3 — Deploy to Development
+  # Trigger: push to develop only
+  # ───────────────────────────────────────────
+  deploy-dev:
+    name: 🟡 Deploy → Development
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment:
+      name: development
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Dev Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEV_HOST }}
+          username: ${{ secrets.DEV_USER }}
+          key: ${{ secrets.DEV_SSH_KEY }}
+          port: ${{ secrets.DEV_PORT }}
+          script: |
+            set -e
+
+            echo "🟡 Starting DEVELOPMENT deployment..."
+            echo "Branch: develop | Commit: ${{ github.sha }}"
+
+            cd /var/www/Syed-Taimoor-Portfolio
+
+            echo "📦 Pulling latest from develop..."
+            git fetch origin
+            git checkout develop
+            git pull origin develop
+
+            echo "📥 Installing dependencies..."
+            yarn install
+
+            echo "🏗️ Building for development..."
+            yarn build
+
+            echo "♻️ Restarting PM2 (dev)..."
+            pm2 restart portfolio-dev || pm2 start yarn --name "portfolio-dev" -- start
+
+            pm2 save
+
+            echo "✅ DEVELOPMENT deployment complete!"
+            echo "🌐 Live at: http://${{ secrets.DEV_HOST }}"
+
+  # ───────────────────────────────────────────
+  # JOB 4 — Deploy to Staging
+  # Trigger: push to release only
+  # ───────────────────────────────────────────
+  deploy-staging:
+    name: 🔵 Deploy → Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/release' && github.event_name == 'push'
+    environment:
+      name: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Staging Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          port: ${{ secrets.STAGING_PORT }}
+          script: |
+            set -e
+
+            echo "🔵 Starting STAGING deployment..."
+            echo "Branch: release | Commit: ${{ github.sha }}"
+
+            cd /var/www/Syed-Taimoor-Portfolio
+
+            echo "📦 Pulling latest from release..."
+            git fetch origin
+            git checkout release
+            git pull origin release
+
+            echo "📥 Installing dependencies..."
+            yarn install
+
+            echo "🏗️ Building for staging..."
+            yarn build
+
+            echo "♻️ Restarting PM2 (staging)..."
+            pm2 restart portfolio-staging || pm2 start yarn --name "portfolio-staging" -- start
+
+            pm2 save
+
+            echo "✅ STAGING deployment complete!"
+            echo "🌐 Live at: http://${{ secrets.STAGING_HOST }}"
+
+  # ───────────────────────────────────────────
+  # JOB 5 — Deploy to Production
+  # Trigger: push to main only
+  # ───────────────────────────────────────────
+  deploy-production:
+    name: 🟢 Deploy → Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Production Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          port: ${{ secrets.PROD_PORT }}
+          script: |
+            set -e
+
+            echo "🟢 Starting PRODUCTION deployment..."
+            echo "Branch: main | Commit: ${{ github.sha }}"
+
+            cd /var/www/Syed-Taimoor-Portfolio
+
+            echo "📦 Pulling latest from main..."
+            git fetch origin
+            git checkout main
+            git pull origin main
+
+            echo "📥 Installing dependencies..."
+            yarn install
+
+            echo "🏗️ Building for production..."
+            yarn build
+
+            echo "♻️ Restarting PM2 (production)..."
+            pm2 restart portfolio || pm2 start yarn --name "portfolio" -- start
+
+            pm2 save
+
+            echo "✅ PRODUCTION deployment complete!"
+            echo "🌐 Live at: http://${{ secrets.PROD_HOST }}"
